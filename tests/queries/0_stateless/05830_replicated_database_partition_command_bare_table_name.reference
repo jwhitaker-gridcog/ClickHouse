@@ -1,0 +1,19 @@
+-- MOVE PARTITION to a table without INSERT on it
+ACCESS_DENIED
+-- MOVE PARTITION to a bare table name goes to the current database of the query
+OK
+d.dst	['src_1']
+r.dst	[]
+r.src	['src_2','src_3']
+-- the same database as the altered table, with a bare and a qualified name
+OK
+OK
+d.dst	['src_1']
+r.dst	['src_2','src_3']
+r.src	[]
+-- REPLACE PARTITION from a bare table name reads the current database of the query
+OK
+not secret
+-- REPLACE PARTITION from a temporary table
+NOT_IMPLEMENTED
+not secret

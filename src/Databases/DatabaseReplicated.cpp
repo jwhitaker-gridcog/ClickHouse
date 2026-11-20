@@ -1631,10 +1631,45 @@ void DatabaseReplicated::checkQueryValid(const ASTPtr & query, ContextPtr query_
 
     if (const auto * query_alter = query->as<ASTAlterQuery>())
     {
-        for (const auto & command : query_alter->command_list->children)
+        /// The replicas resolve an empty database of the other table of a partition command with the name of this database
+        /// on each of them as the current one, while the access has been checked with the current database of the query.
+        /// So the name must be qualified, unless it is this database: then the other way around, because this database
+        /// may have another name on the other replicas.
+        auto bind_database = [&](String & database)
         {
-            if (!isSupportedAlterTypeForOnClusterDDLQuery(command->as<ASTAlterCommand&>().type))
+            if (database.empty())
+            {
+                database = query_context->getCurrentDatabase();
+            }
+            if (database == getDatabaseName())
+            {
+                database.clear();
+            }
+        };
+
+        for (const auto & command_ast : query_alter->command_list->children)
+        {
+            auto & command = command_ast->as<ASTAlterCommand &>();
+            if (!isSupportedAlterTypeForOnClusterDDLQuery(command.type))
+            {
                 throw Exception(ErrorCodes::NOT_IMPLEMENTED, "Unsupported type of ALTER query");
+            }
+
+            if (command.type == ASTAlterCommand::MOVE_PARTITION && command.move_destination_type == DataDestinationType::TABLE)
+            {
+                bind_database(command.to_database);
+            }
+
+            if (command.type == ASTAlterCommand::REPLACE_PARTITION)
+            {
+                if (command.from_database.empty()
+                    && query_context->tryResolveStorageID(StorageID{command.from_database, command.from_table}, Context::ResolveExternal))
+                {
+                    throw Exception(ErrorCodes::NOT_IMPLEMENTED,
+                        "A temporary table cannot be the source of a partition in a query replicated by a Replicated database");
+                }
+                bind_database(command.from_database);
+            }
         }
     }
 

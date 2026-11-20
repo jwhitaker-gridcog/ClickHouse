@@ -106,6 +106,29 @@ namespace ErrorCodes
 namespace
 {
 
+/// The partition commands which name another table - `MOVE PARTITION ... TO TABLE` and `REPLACE` / `ATTACH PARTITION ... FROM` -
+/// leave its database empty to mean the current one. Bind it before the access check, so that the check and the execution
+/// cannot resolve the name differently: a `Replicated` database replays the query on every replica with the altered table's
+/// database as the current one (see `DatabaseReplicated::checkQueryValid`). The source of `REPLACE PARTITION` may also be
+/// a temporary table, which takes priority over the current database, so it is left as it is.
+void bindDatabasesOfPartitionCommandTables(const ASTAlterQuery & alter, const ContextPtr & context)
+{
+    for (const auto & child : alter.command_list->children)
+    {
+        auto & command = child->as<ASTAlterCommand &>();
+        if (command.type == ASTAlterCommand::MOVE_PARTITION && command.move_destination_type == DataDestinationType::TABLE
+            && command.to_database.empty())
+        {
+            command.to_database = context->getCurrentDatabase();
+        }
+        else if (command.type == ASTAlterCommand::REPLACE_PARTITION && command.from_database.empty()
+            && !context->tryResolveStorageID(StorageID{command.from_database, command.from_table}, Context::ResolveExternal))
+        {
+            command.from_database = context->getCurrentDatabase();
+        }
+    }
+}
+
 /// A `Replicated`-database host applies the statement without the submitting user. `ON CLUSTER` does
 /// not reach this: it is refused unless its hosts run as the initiating user.
 void checkAddedIndexPermissions(const ASTAlterQuery & alter, const StoragePtr & table, const ContextPtr & context)
@@ -700,6 +723,8 @@ BlockIO InterpreterAlterQuery::executeToTable(const ASTAlterQuery & alter)
         };
         return executeDDLQueryOnCluster(query_ptr, getContext(), params);
     }
+
+    bindDatabasesOfPartitionCommandTables(alter, getContext());
 
     if (!skip_access_check)
     {

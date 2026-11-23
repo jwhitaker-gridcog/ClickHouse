@@ -938,12 +938,21 @@ void StatementGenerator::generateFuncCall(RandomGenerator & rg, const bool allow
             func_call->add_params()->mutable_lit_val()->set_no_quote_str("'" + generateNextCodecString(rg) + "'");
             if (rg.nextBool())
             {
-                func_call->add_params()->mutable_lit_val()->set_no_quote_str(rg.pickRandomly(blockSizes));
+                func_call->add_params()->mutable_lit_val()->set_no_quote_str(
+                    rg.nextSmallNumber() < 3 ? std::to_string(rg.nextRandomUInt64()) : rg.pickRandomly(blockSizes));
             }
         }
         else
         {
             generated_params += generateArgList(rg, min_params, max_params, [&]() { return func_call->add_params(); });
+            /// Parameters are mostly sizes, levels and counts, so sometimes make one a big integer, often a boundary one
+            if (func_call->params_size() > 0 && rg.nextSmallNumber() < 3)
+            {
+                Expr * param = func_call->mutable_params(rg.randomInt<int>(0, func_call->params_size() - 1));
+
+                param->Clear();
+                param->mutable_lit_val()->mutable_int_lit()->set_uint_lit(rg.nextRandomUInt64());
+            }
         }
         generated_params += generateArgList(rg, min_args, max_args, [&]() { return func_call->add_args()->mutable_expr(); });
 

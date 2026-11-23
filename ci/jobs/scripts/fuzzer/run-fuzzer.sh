@@ -40,7 +40,9 @@ unset _san _var
 # itself from prof_prefix and does not create the directory.
 JEMALLOC_PROFILES_DIR="/workspace/jemalloc_profiles"
 mkdir -p "$JEMALLOC_PROFILES_DIR"
-export MALLOC_CONF="${MALLOC_CONF:+${MALLOC_CONF},}prof_prefix:${JEMALLOC_PROFILES_DIR}/clickhouse.jemalloc"
+# junk:true fills memory on allocation and free, so a use-after-free or uninitialized read
+# fails close to the bug instead of silently corrupting the heap.
+export MALLOC_CONF="${MALLOC_CONF:+${MALLOC_CONF},}junk:true,prof_prefix:${JEMALLOC_PROFILES_DIR}/clickhouse.jemalloc"
 
 function collect_sanitizer_reports
 {
@@ -94,6 +96,8 @@ function configure
     cp -av --dereference "$repo_dir"/tests/config/config.d/macros.xml $CONFIG_DIR/config.d
     cp -av --dereference "$repo_dir"/tests/config/config.d/jemalloc_enable_global_profiler.yaml $CONFIG_DIR/config.d
     cp -av --dereference "$repo_dir"/tests/config/config.d/jemalloc_flush_profile.yaml $CONFIG_DIR/config.d
+    # 128MB caches, so evictions happen under the fuzzer's load.
+    cp -av --dereference "$repo_dir"/tests/config/config.d/small_caches.xml $CONFIG_DIR/config.d
     cp -av --dereference "$repo_dir"/tests/config/server.crt "$repo_dir"/tests/config/server.key $CONFIG_DIR
     cp -av --dereference "$repo_dir"/tests/config/users.d/ci_logs_sender.yaml $CONFIG_DIR/users.d
     cp -av --dereference "$repo_dir"/ci/jobs/scripts/fuzzer/query-fuzzer-tweaks-users.xml $CONFIG_DIR/users.d

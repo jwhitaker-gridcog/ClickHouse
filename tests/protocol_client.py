@@ -17,10 +17,13 @@ The non-standard Python modules (`grpc`, `pyarrow`) are imported only by the pro
 
 import argparse
 import base64
+import bz2
 import hashlib
 import http.client
 import json
+import lzma
 import os
+import random
 import re
 import shutil
 import signal
@@ -32,6 +35,7 @@ import sys
 import tempfile
 import urllib.parse
 import uuid
+import zlib
 
 PROTOCOLS = [
     "http",
@@ -47,6 +51,18 @@ PROTOCOLS = [
 # The server-side end of a query is governed by the test timeout of `clickhouse-test`, which kills
 # this process. These timeouts only bound waiting on a peer that went silent.
 SOCKET_TIMEOUT = 600
+
+# `send_progress_in_http_headers` sends a header every `http_headers_progress_interval_ms` until the
+# response starts, which is the whole query with `http_wait_end_of_query`; `http.client` refuses more than 100.
+http.client._MAXHEADERS = 1_000_000
+
+# The HTTP response compressions of the server that the standard library can decompress.
+HTTP_RESPONSE_DECOMPRESSORS = {
+    "gzip": lambda: zlib.decompressobj(32 + zlib.MAX_WBITS),
+    "deflate": lambda: zlib.decompressobj(32 + zlib.MAX_WBITS),
+    "xz": lzma.LZMADecompressor,
+    "bz2": bz2.BZ2Decompressor,
+}
 
 # `ssh` passes the whole test as the command of the channel, which travels in one `argv` element of
 # the `ssh` client; Linux limits one element to 128 KiB (`MAX_ARG_STRLEN`).
@@ -533,11 +549,18 @@ class HTTPClient(QueryClient):
         # tagged block checked below. `supports` excludes the tests that set it themselves.
         params += [("http_write_exception_in_output_format", "0")]
         params += [(f"param_{name}", value) for name, value in self.params]
+        headers = {"X-ClickHouse-User": self.user}
+        # Sometimes a compressed response, and progress in the headers, which only the HTTP handler has.
+        if random.random() < 0.25:
+            params += [("enable_http_compression", "1")]
+            headers["Accept-Encoding"] = random.choice(list(HTTP_RESPONSE_DECOMPRESSORS))
+        if random.random() < 0.25:
+            params += [("send_progress_in_http_headers", "1")]
         url = "/?" + urllib.parse.urlencode(params)
         body = query.encode("utf-8", errors="surrogateescape")
         incomplete = False
         try:
-            self.connection.request("POST", url, body=body, headers={"X-ClickHouse-User": self.user})
+            self.connection.request("POST", url, body=body, headers=headers)
             response = self.connection.getresponse()
             try:
                 data = response.read()
@@ -551,6 +574,8 @@ class HTTPClient(QueryClient):
             self.connection.close()
             raise
         code = response.getheader("X-ClickHouse-Exception-Code")
+        # A compressed response is compressed whole, including the message or the block of an exception
+        data = self.decompress(data, response.getheader("Content-Encoding"), complete=not incomplete)
         if response.status != 200 or code:
             raise QueryError(data.decode("utf-8", errors="replace"), int(code) if code else None)
         # An exception after the response has started (with `http_wait_end_of_query = 0` or a small
@@ -562,6 +587,19 @@ class HTTPClient(QueryClient):
         if incomplete:
             raise QueryError(f"Incomplete HTTP response without an exception: {data[-1024:]!r}")
         return data
+
+    @staticmethod
+    def decompress(data, encoding, complete):
+        """The data of a response with this `Content-Encoding`; a broken response decompresses as far as it goes."""
+        if not encoding:
+            return data
+        if encoding not in HTTP_RESPONSE_DECOMPRESSORS:
+            raise QueryError(f"Unexpected Content-Encoding of the HTTP response: {encoding}")
+        decompressor = HTTP_RESPONSE_DECOMPRESSORS[encoding]()
+        res = decompressor.decompress(data)
+        if complete and not decompressor.eof:
+            raise QueryError(f"Truncated {encoding} HTTP response")
+        return res
 
     @staticmethod
     def tagged_exception(data, tag):

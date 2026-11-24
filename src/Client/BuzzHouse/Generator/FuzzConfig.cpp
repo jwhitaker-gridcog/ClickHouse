@@ -1023,7 +1023,7 @@ ORDER BY f.name)sql";
         simple_det_aggrs.emplace_back("any", 0, 0, 1, 1, false);
 }
 
-void FuzzConfig::loadServerConfigurations()
+void FuzzConfig::loadServerConfigurations(RandomGenerator & rg)
 {
     loadServerSettings<String>(this->collations, "collations", R"(SELECT "name" FROM "system"."collations")");
     loadServerSettings<String>(this->in_formats, "input formats", R"(SELECT "name" FROM "system"."formats" WHERE "is_input" = 1)");
@@ -1071,11 +1071,73 @@ void FuzzConfig::loadServerConfigurations()
     loadServerSettings<String>(this->caches, "caches", "SHOW FILESYSTEM CACHES");
     if (enable_failpoints)
     {
-        loadServerSettings<String>(
-            this->failpoints,
-            "failpoints",
-            "SELECT \"name\" FROM \"system\".\"fail_points\""
-            " WHERE \"type\" NOT IN ('pauseable', 'pauseable_once') ORDER BY rand() LIMIT 10");
+        /// Only fail points that throw an exception, or fail a Keeper operation once, in background work and writes.
+        /// Others sleep, pause, abort, wedge a queue entry, change results, or fail every merge with an ordinary code.
+        static const DB::Strings allowed_failpoints
+            = {"azure_inject_auth_failure_on_request_once",
+               "azure_inject_poco_network_error_once",
+               "azure_inject_poco_timeout_once",
+               "backup_fail_before_writing_metadata",
+               "backup_fail_lock_file_check_after_creation",
+               "backup_fail_lock_file_write_after_commit",
+               "backup_fail_lock_file_write_after_open",
+               "backup_fail_reading_archive_size",
+               "check_table_inject_retryable_zk_error",
+               "compact_part_writer_fail_in_add_streams",
+               "deduplication_log_fail_durable_drop_sync",
+               "delta_lake_commit_fail_before_log_write",
+               "disk_object_storage_fail_commit_metadata_transaction",
+               "disk_object_storage_fail_precommit_metadata_transaction",
+               "file_cache_slru_downgrade_fail_before_finalize",
+               "iceberg_writes_cleanup",
+               "keepermap_fail_drop_data",
+               "local_directory_sync_fail",
+               "local_object_storage_network_error_during_remove",
+               "merge_task_throw_while_preparing_next_column",
+               "merge_tree_load_part_io_error",
+               "merge_tree_refresh_parts_throw_once",
+               "merge_tree_sequential_source_throw_in_constructor",
+               "mt_alter_readonly_throw_in_start_background_workers",
+               "mt_alter_settings_throw_before_metadata_commit",
+               "mt_alter_throw_after_mutation_registered",
+               "mt_alter_throw_in_durable_rollback",
+               "mt_alter_throw_in_start_mutation",
+               "mt_background_jobs_assignee_throw_after_task_created",
+               "mt_drop_selected_ttl_merge_once",
+               "mt_fail_selected_merge_before_start_once",
+               "mt_skip_scheduling_merge_once",
+               "mt_throw_after_mutation_commit",
+               "mt_throw_after_renaming_empty_parts",
+               "object_storage_queue_fail_commit_after_success",
+               "object_storage_queue_fail_commit_once",
+               "object_storage_queue_fail_delete",
+               "object_storage_queue_fail_in_the_middle_of_file",
+               "object_storage_queue_fail_tags_fetch",
+               "plain_object_storage_copy_fail_on_file_move",
+               "plain_object_storage_copy_temp_source_file_fail_on_file_move",
+               "plain_object_storage_copy_temp_target_file_fail_on_file_move",
+               "plain_object_storage_fail_after_copy_on_file_move",
+               "plain_object_storage_fail_on_finalize",
+               "plain_object_storage_write_fail_on_directory_create",
+               "plain_object_storage_write_fail_on_directory_move",
+               "refresh_mv_fail_znodes_read",
+               "replicated_merge_tree_commit_zk_fail_after_op",
+               "replicated_merge_tree_commit_zk_fail_when_recovering_from_hw_fault",
+               "replicated_merge_tree_insert_quorum_fail_0",
+               "restore_part_inject_no_space_error",
+               "rocksdb_rename_throw_filesystem_error",
+               "s3_read_buffer_throw_expired_token",
+               "s3_send_request_throw_expired_token",
+               "smt_insert_fake_hardware_error",
+               "stripe_log_sink_write_fallpoint",
+               "wide_part_writer_fail_in_add_streams",
+               "write_through_cache_fail"};
+        /// A build without one of them rejects its `SYSTEM ENABLE FAILPOINT`, which is harmless
+        DB::Strings shuffled = allowed_failpoints;
+
+        std::shuffle(shuffled.begin(), shuffled.end(), rg.generator);
+        shuffled.resize(rg.randomInt<size_t>(1, 10));
+        this->failpoints = std::move(shuffled);
     }
     loadServerSettings<String>(this->tokenizers, "tokenizers", R"(SELECT "name" FROM "system"."tokenizers")");
     loadFunctions();
@@ -1371,11 +1433,13 @@ void FuzzConfig::validateClickHouseHealth()
     /// over NULLs retries forever. `CANNOT_PARSE_*`, `CANNOT_CONVERT_TYPE`, out of range, `CANNOT_INSERT_NULL_IN_ORDINARY_COLUMN`
     static const String data_conversion_errors = "(6, 25, 26, 27, 38, 41, 70, 72, 321, 349, 376, 407, 441, 467, 675, 676)";
     /// The same errors in a replicated mutation, which records them in its queue entry too. The code is only in the text.
-    static const String unexpected_queue_error = "\"last_exception\" != '' AND NOT (\"type\" = 'MUTATE_PART' AND "
+    /// `FAULT_INJECTED` comes from the fail points BuzzHouse enables
+    static const String unexpected_queue_error = "\"last_exception\" != '' AND NOT startsWith(\"last_exception\", 'Code: 710.') AND "
+                                                 "NOT (\"type\" = 'MUTATE_PART' AND "
                                                  "toUInt32OrZero(extract(\"last_exception\", '^Code: ([0-9]+)[.]')) IN "
         + data_conversion_errors + ")";
     /// Temporary data only in the distributed cache fails merges while no cache server is registered, e.g. after a restart
-    static const String unexpected_part_error = "exception != '' AND error NOT IN " + data_conversion_errors
+    static const String unexpected_part_error = "exception != '' AND error != 710 AND error NOT IN " + data_conversion_errors
         + " AND NOT (error = 900 AND exception LIKE '%no server is available%')";
 
     if (processServerQuery(

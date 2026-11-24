@@ -455,7 +455,7 @@ private:
     void loadFunctions();
 
 public:
-    void loadServerConfigurations();
+    void loadServerConfigurations(RandomGenerator & rg);
 
     String getConnectionHostAndPort(bool secure) const;
 

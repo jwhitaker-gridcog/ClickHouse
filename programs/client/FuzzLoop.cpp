@@ -764,7 +764,7 @@ bool Client::buzzHouse()
 
         fuzz_config->outf << "--Session seed: " << rg.getSeed() << std::endl;
         /// Load server configurations for the fuzzer
-        fuzz_config->loadServerConfigurations();
+        fuzz_config->loadServerConfigurations(rg);
         loadFuzzerServerSettings(*fuzz_config);
         loadFuzzerTableSettings(*fuzz_config, has_cloud_features);
         loadSystemTables(*fuzz_config);

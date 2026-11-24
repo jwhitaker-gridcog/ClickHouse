@@ -228,13 +228,14 @@ class ElOraculoDeTablas:
         "(6, 25, 26, 27, 38, 41, 70, 72, 321, 349, 376, 407, 441, 467, 675, 676)"
     )
     # The same errors in a replicated mutation, which records them in its queue entry too. The code is only in the text.
+    # `FAULT_INJECTED` (710) comes from the fail points BuzzHouse enables
     UNEXPECTED_QUEUE_ERROR = (
-        "last_exception != '' AND NOT (type = 'MUTATE_PART' AND "
+        "last_exception != '' AND NOT startsWith(last_exception, 'Code: 710.') AND NOT (type = 'MUTATE_PART' AND "
         f"toUInt32OrZero(extract(last_exception, '^Code: ([0-9]+)[.]')) IN {DATA_CONVERSION_ERRORS})"
     )
     # Temporary data only in the distributed cache fails merges while no cache server is registered, e.g. after a restart
     UNEXPECTED_PART_ERROR = (
-        f"exception != '' AND error NOT IN {DATA_CONVERSION_ERRORS} "
+        f"exception != '' AND error != 710 AND error NOT IN {DATA_CONVERSION_ERRORS} "
         "AND NOT (error = 900 AND exception LIKE '%no server is available%')"
     )
 

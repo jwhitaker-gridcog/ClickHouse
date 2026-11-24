@@ -1698,6 +1698,38 @@ static std::unordered_map<String, CHSetting> serverSettings2 = {
     {"merge_tree_use_const_size_tasks_for_remote_reading", trueOrFalseSettingNoOracle},
     {"merge_tree_use_v1_object_and_dynamic_serialization", trueOrFalseSettingNoOracle},
     {"metrics_perf_events_enabled", trueOrFalseSettingNoOracle},
+    {"metrics_perf_events_list",
+     CHSetting(
+         [](RandomGenerator & rg, FuzzConfig &)
+         {
+             /// Empty opens every event for each thread, and some events are unsupported on VMs, each logging a warning
+             return settingCombinations(
+                 rg,
+                 {"PerfCPUCycles",
+                  "PerfInstructions",
+                  "PerfCacheReferences",
+                  "PerfCacheMisses",
+                  "PerfBranchInstructions",
+                  "PerfBranchMisses",
+                  "PerfBusCycles",
+                  "PerfStalledCyclesFrontend",
+                  "PerfStalledCyclesBackend",
+                  "PerfRefCPUCycles",
+                  "PerfCPUClock",
+                  "PerfTaskClock",
+                  "PerfContextSwitches",
+                  "PerfCPUMigrations",
+                  "PerfAlignmentFaults",
+                  "PerfEmulationFaults",
+                  "PerfDataTLBReferences",
+                  "PerfDataTLBMisses",
+                  "PerfInstructionTLBReferences",
+                  "PerfInstructionTLBMisses",
+                  "PerfLocalMemoryReferences",
+                  "PerfLocalMemoryMisses"});
+         },
+         {},
+         false)},
     {"min_count_to_compile_aggregate_expression", CHSetting(zeroToThree, {"0", "1", "2", "3"}, false)},
     {"min_count_to_compile_expression", CHSetting(zeroToThree, {"0", "1", "2", "3"}, false)},
     {"min_count_to_compile_regular_expression", CHSetting(zeroToThree, {"0", "1", "2", "3"}, false)},

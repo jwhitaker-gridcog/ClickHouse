@@ -114,6 +114,29 @@ function configure
 </clickhouse>
 EOL
 
+    # Half of the runs read through a small userspace page cache that drops pages at random, local disks
+    # too, which needs the `pread` read method. The server has no page cache by default.
+    if (( RANDOM % 4 )); then
+        echo "Using the userspace page cache with page_cache_inject_eviction"
+        cat > $CONFIG_DIR/config.d/page_cache.xml <<EOL
+<clickhouse>
+    <page_cache_min_size>67108864</page_cache_min_size>
+    <page_cache_max_size>134217728</page_cache_max_size>
+</clickhouse>
+EOL
+        cat > $CONFIG_DIR/users.d/page_cache.xml <<EOL
+<clickhouse>
+    <profiles>
+        <default>
+            <page_cache_inject_eviction>1</page_cache_inject_eviction>
+            <use_page_cache_for_local_disks>1</use_page_cache_for_local_disks>
+            <local_filesystem_read_method>pread</local_filesystem_read_method>
+        </default>
+    </profiles>
+</clickhouse>
+EOL
+    fi
+
 
     (cd $repo_dir && python3 $repo_dir/ci/jobs/scripts/clickhouse_proc.py logs_export_config)
 }

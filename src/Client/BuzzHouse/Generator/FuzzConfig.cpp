@@ -1560,6 +1560,11 @@ void FuzzConfig::validateClickHouseHealth()
         }
     }
 
+    checkTablesIntegrity("ALL TABLES");
+}
+
+void FuzzConfig::checkTablesIntegrity(const String & target)
+{
     /// Verify the parts on disk, e.g. after a merge hit by `memory_tracker_fault_probability`. The server rethrows memory
     /// and network errors, a timeout stops quietly, and other failures can be remote disk outages, so only these are damage.
     /// `ReplicatedMergeTree` reports only `looks broken`, and detaches the part as `broken` too.
@@ -1579,25 +1584,28 @@ void FuzzConfig::validateClickHouseHealth()
     if (processServerQuery(
             false,
             fmt::format(
-                "CHECK ALL TABLES INTO OUTFILE '{}' TRUNCATE FORMAT TabSeparated SETTINGS check_query_single_value_result = 0, "
+                "CHECK {} INTO OUTFILE '{}' TRUNCATE FORMAT TabSeparated SETTINGS check_query_single_value_result = 0, "
                 "max_execution_time = 60, timeout_overflow_mode = 'break';",
+                target,
                 fuzzer_out_file.generic_string())))
     {
         String buf;
         std::ifstream infile(fuzzer_out_file, std::ios::in);
         while (std::getline(infile, buf))
         {
-            /// Columns: database, table, part_path, is_passed, message
-            const size_t passed_pos = buf.find('\t', buf.find('\t', buf.find('\t') + 1) + 1);
+            /// The last two columns are `is_passed` and `message`, `CHECK ALL TABLES` adds the database and table first
+            const size_t message_pos = buf.rfind('\t');
+            const size_t passed_pos = (message_pos == String::npos || message_pos == 0) ? String::npos : buf.rfind('\t', message_pos - 1);
 
             if (passed_pos != String::npos && buf.compare(passed_pos + 1, 2, "0\t") == 0
-                && std::ranges::any_of(corruption_errors, [&](const String & code) { return buf.find(code, passed_pos) != String::npos; }))
+                && std::ranges::any_of(corruption_errors, [&](const String & code) { return buf.find(code, message_pos) != String::npos; }))
             {
                 throw DB::Exception(
                     DB::ErrorCodes::BUZZHOUSE_ORACLE,
-                    "ClickHouse health check on {}:{}: CHECK ALL TABLES found a broken part: {}",
+                    "ClickHouse health check on {}:{}: CHECK {} found a broken part: {}",
                     host,
                     port,
+                    target,
                     buf);
             }
         }

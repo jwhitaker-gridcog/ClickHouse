@@ -519,6 +519,9 @@ public:
     void comparePerformanceResults(const String & oracle_name, PerformanceResult & server, PerformanceResult & peer) const;
 
     void validateClickHouseHealth();
+
+    /// Run `CHECK <target>`, e.g. `ALL TABLES` or `TABLE d.t`, and throw on a corrupted part
+    void checkTablesIntegrity(const String & target);
 };
 
 }

@@ -22,7 +22,8 @@ enum class DumpOracleStrategy
     REPLACE_PARTITION = 10,
     ALTER_COLUMN = 11,
     ALTER_TABLE = 12,
-    TRUNCATE_COUNT = 13
+    TRUNCATE_COUNT = 13,
+    MUTATION_BURST = 14
 };
 
 enum class OracleCombination

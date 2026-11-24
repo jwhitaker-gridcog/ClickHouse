@@ -912,7 +912,8 @@ void QueryOracle::dumpTableContent(
             addOrderedTableDumpColumns(rg, gen, t.cols, ssc);
         }
         break;
-        case DumpOracleStrategy::ALTER_UPDATE: {
+        case DumpOracleStrategy::ALTER_UPDATE:
+        case DumpOracleStrategy::MUTATION_BURST: {
             /// Just match the count
             addCountColumn(ssc, "s0");
         }
@@ -960,10 +961,21 @@ void QueryOracle::dumpTableContent(
         case DumpOracleStrategy::REPLACE_PARTITION:
         case DumpOracleStrategy::ALTER_COLUMN:
         case DumpOracleStrategy::ALTER_TABLE:
-            /// Second step equal as the first one
+            /// Second step equal as the first one, sometimes flipping reading in order, which must not change the content
             sq2.CopyFrom(sq1);
+            if (test_content && rg.nextSmallNumber() < 4)
+            {
+                const bool in_order = rg.nextBool();
+
+                StatementGenerator::appendSetting(sel->mutable_setting_values(), "optimize_read_in_order", in_order ? "1" : "0");
+                StatementGenerator::appendSetting(
+                    sq2.mutable_single_query()->mutable_explain()->mutable_inner_query()->mutable_select()->mutable_sel()->mutable_setting_values(),
+                    "optimize_read_in_order",
+                    in_order ? "0" : "1");
+            }
             break;
         case DumpOracleStrategy::ALTER_UPDATE:
+        case DumpOracleStrategy::MUTATION_BURST:
         case DumpOracleStrategy::TRUNCATE_COUNT:
         case DumpOracleStrategy::INSERT_COUNT: {
             /// In the second step, just get the total count
@@ -1159,6 +1171,50 @@ void QueryOracle::dumpOracleIntermediateSteps(
                 maybeSetClusterAndSettings(at);
             }
             intermediate_queries.emplace_back(next);
+        }
+        break;
+        case DumpOracleStrategy::MUTATION_BURST: {
+            /// Queue mutations before any finishes, maybe each delayed by the fail point. The last one waits for all of them
+            const uint32_t nmutations = rg.randomInt<uint32_t>(2, 5);
+            const bool delay = fc.enable_failpoints && rg.nextBool();
+            static const String delay_failpoint = "mutate_task_random_sleep_in_prepare";
+
+            if (delay)
+            {
+                SQLQuery enable;
+
+                enable.mutable_single_query()->mutable_explain()->mutable_inner_query()->mutable_system_cmd()->set_enable_failpoint(
+                    delay_failpoint);
+                intermediate_queries.emplace_back(enable);
+            }
+            for (uint32_t i = 0; i < nmutations; i++)
+            {
+                SQLQuery mut;
+                Alter * at = mut.mutable_single_query()->mutable_explain()->mutable_inner_query()->mutable_alter();
+
+                at->set_is_temp(t.is_temp);
+                at->set_sobject(SQLObject::TABLE);
+                t.setName(at->mutable_object()->mutable_est(), false);
+                gen.generateNextUpdate(rg, t, at->mutable_alter()->mutable_update());
+                maybeSetClusterAndSettings(at);
+                if (i == nmutations - 1)
+                {
+                    finishSettings(at->mutable_setting_values());
+                }
+                else
+                {
+                    StatementGenerator::appendSetting(at->mutable_setting_values(), "mutations_sync", "0");
+                }
+                intermediate_queries.emplace_back(mut);
+            }
+            if (delay)
+            {
+                SQLQuery disable;
+
+                disable.mutable_single_query()->mutable_explain()->mutable_inner_query()->mutable_system_cmd()->set_disable_failpoint(
+                    delay_failpoint);
+                intermediate_queries.emplace_back(disable);
+            }
         }
         break;
         case DumpOracleStrategy::INSERT_COUNT: {

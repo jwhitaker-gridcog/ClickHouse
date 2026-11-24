@@ -225,6 +225,8 @@ void QueryOracle::reattachSteps(
     {
         gen.generateSettingValues(rg, formatSettings, att->mutable_setting_values());
     }
+    /// A session `SET` of the change data feed versions makes every object storage engine refuse to attach
+    finishSettings(att->mutable_setting_values());
     intermediate_queries.emplace_back(next);
     intermediate_queries.emplace_back(next2);
 }

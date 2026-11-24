@@ -935,7 +935,7 @@ void StatementGenerator::generateFuncCall(RandomGenerator & rg, const bool allow
         this->levels[this->current_level].allow_window_funcs = rg.nextSmallNumber() < 3;
         if (agg.fname == "estimateCompressionRatio" && rg.nextSmallNumber() < 9)
         {
-            func_call->add_params()->mutable_lit_val()->set_no_quote_str("'" + generateNextCodecString(rg) + "'");
+            func_call->add_params()->mutable_lit_val()->set_no_quote_str("'" + generateNextCodecString(rg, true) + "'");
             if (rg.nextBool())
             {
                 func_call->add_params()->mutable_lit_val()->set_no_quote_str(

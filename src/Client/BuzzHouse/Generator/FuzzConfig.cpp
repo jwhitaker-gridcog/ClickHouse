@@ -650,10 +650,13 @@ bool FuzzConfig::processServerQuery(const bool outlog, const String & query)
 
 String FuzzConfig::helperQuery(const String & query, const String & format, const String & settings) const
 {
-    /// Session settings that make the helper query fail, e.g. `make_distributed_plan` with `extremes`, or change its rows
+    /// Session settings that make the helper query fail, e.g. `make_distributed_plan` with `extremes`, or change its rows,
+    /// e.g. a stale query cache entry, a timeout that stops quietly, or no row for `count` over an empty set
     return fmt::format(
         "{} INTO OUTFILE '{}' TRUNCATE FORMAT {} SETTINGS extremes = 0, limit = 0, make_distributed_plan = 0, "
-        "enable_parallel_replicas = 0{}{};",
+        "enable_parallel_replicas = 0, use_query_cache = 0, empty_result_for_aggregation_by_empty_set = 0, "
+        "timeout_overflow_mode = 'throw', timeout_overflow_mode_leaf = 'throw', max_estimated_execution_time = 0, "
+        "force_optimize_skip_unused_shards = 0, format_tsv_null_representation = '\\\\N', output_format_tsv_crlf_end_of_line = 0{}{};",
         query,
         fuzzer_out_file.generic_string(),
         format,

@@ -4,9 +4,9 @@
 # no-parallel: the failpoint holds the task starts of every distributed query on the server.
 #
 # The coordinator sends the `start_tasks` batches of several workers at once from its sender threads, so a cancel can
-# overtake a batch that is on the wire. The worker remembers the cancelled ids and ignores their late start.
+# overtake a batch that is on the wire. The cancel names the query, and the worker ignores the query's tasks that arrive later.
 # The failpoint holds the worker's start handlers after the body is read, the query is killed meanwhile, and the batches are
-# released only after the worker has remembered every task the query queued.
+# released only after every worker that got a batch has the query's cancel.
 
 CUR_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 # shellcheck source=../shell_config.sh
@@ -52,13 +52,14 @@ wait_for "SELECT count() > 0 FROM system.text_log WHERE event_date >= yesterday(
     AND message LIKE 'Starting distributed query, unique id: %'"
 UNIQUE_ID=$($CLICKHOUSE_CLIENT --query "SELECT extract(any(message), 'unique id: (\\\\S+)') FROM system.text_log
     WHERE event_date >= yesterday() AND query_id = '$QUERY_ID' AND message LIKE 'Starting distributed query, unique id: %'")
-TASK_LINES="SELECT countIf(message LIKE 'Queueing task %') AS queued, countIf(message LIKE 'Remembering cancelled unknown task %') AS remembered,
+TASK_LINES="SELECT countIf(message LIKE 'Remembering cancelled unknown task %') AS remembered,
+    countIf(message LIKE 'Request URI:%operation=start_tasks%') AS batches_sent, countIf(message LIKE 'Cancelling the % tasks of %') AS cancels,
     sumIf(toUInt64OrZero(extract(message, 'batch of (\\d+) tasks')), message LIKE 'Starting a batch of %') AS arrived,
-    countIf(message LIKE 'Ignoring the start of task %') AS ignored
+    countIf(message LIKE 'Ignoring task % its query was cancelled') AS ignored
     FROM system.text_log WHERE event_date >= yesterday() AND position(message, '$UNIQUE_ID') > 0"
 
-# Every queued task is cancelled while unknown to the worker: up to two batches are held there, the rest were not sent.
-wait_for "SELECT queued > 0 AND remembered = queued FROM ($TASK_LINES)"
+# Each held batch went to its own worker, and each such worker gets one cancel for the query; batches not sent yet are dropped.
+wait_for "SELECT batches_sent > 0 AND cancels = batches_sent FROM ($TASK_LINES)"
 
 # The held batches reach `startTasks` now; the senders skip the other batches as the query is cancelled.
 $CLICKHOUSE_CLIENT --query "SYSTEM DISABLE FAILPOINT $FP"
@@ -66,7 +67,7 @@ wait $CLIENT_PID
 wait_for "SELECT arrived > 0 AND ignored = arrived FROM ($TASK_LINES)"
 
 $CLICKHOUSE_CLIENT --query "SYSTEM FLUSH LOGS query_log"
-$CLICKHOUSE_CLIENT --query "SELECT 'every queued task remembered', remembered = queued, 'every task that arrived ignored', arrived > 0 AND ignored = arrived
+$CLICKHOUSE_CLIENT --query "SELECT 'no task id remembered', remembered = 0, 'every task that arrived ignored', arrived > 0 AND ignored = arrived
     FROM ($TASK_LINES)"
 RECENT="event_date >= yesterday() AND event_time >= now() - INTERVAL 300 SECOND"
 $CLICKHOUSE_CLIENT --query "SELECT 'initial query logged', count() > 0 FROM system.query_log

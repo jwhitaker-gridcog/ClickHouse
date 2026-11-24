@@ -648,13 +648,25 @@ bool FuzzConfig::processServerQuery(const bool outlog, const String & query)
     return res;
 }
 
+String FuzzConfig::helperQuery(const String & query, const String & format, const String & settings) const
+{
+    /// Session settings that make the helper query fail, e.g. `make_distributed_plan` with `extremes`, or change its rows
+    return fmt::format(
+        "{} INTO OUTFILE '{}' TRUNCATE FORMAT {} SETTINGS extremes = 0, limit = 0, make_distributed_plan = 0, "
+        "enable_parallel_replicas = 0{}{};",
+        query,
+        fuzzer_out_file.generic_string(),
+        format,
+        settings.empty() ? "" : ", ",
+        settings);
+}
+
 std::optional<DB::Strings> FuzzConfig::queryLines(const String & query, const bool outlog, const String & format)
 {
     String buf;
     DB::Strings res;
 
-    if (!processServerQuery(
-            outlog, fmt::format("{} INTO OUTFILE '{}' TRUNCATE FORMAT {};", query, fuzzer_out_file.generic_string(), format)))
+    if (!processServerQuery(outlog, helperQuery(query, format)))
     {
         return std::nullopt;
     }
@@ -1444,7 +1456,7 @@ void FuzzConfig::validateClickHouseHealth()
 
     if (processServerQuery(
             false,
-            fmt::format(
+            helperQuery(fmt::format(
                 "SELECT x FROM ("
                 "(SELECT count() x, 1 y FROM \"system\".\"detached_parts\" WHERE startsWith(\"name\", 'broken'))"
                 " UNION ALL "
@@ -1483,12 +1495,10 @@ void FuzzConfig::validateClickHouseHealth()
                 " UNION ALL "
                 "(SELECT count() x, 14 y FROM \"system\".\"replication_queue\""
                 " WHERE {} AND \"num_tries\" > 5)"
-                ") tx ORDER BY y SETTINGS use_query_cache = 0, use_query_condition_cache = 0 INTO OUTFILE '{}' TRUNCATE FORMAT "
-                "TabSeparated;",
-                unexpected_part_error,
-                unexpected_queue_error,
-                unexpected_queue_error,
-                fuzzer_out_file.generic_string())))
+                ") tx ORDER BY y SETTINGS use_query_cache = 0, use_query_condition_cache = 0",
+                    unexpected_part_error,
+                    unexpected_queue_error,
+                    unexpected_queue_error))))
     {
         String buf;
         size_t i = 0;
@@ -1533,10 +1543,7 @@ void FuzzConfig::validateClickHouseHealth()
             {
                 String details;
                 if (i < detail_queries.size() && !detail_queries[i].empty()
-                    && processServerQuery(
-                        false,
-                        fmt::format(
-                            "{} INTO OUTFILE '{}' TRUNCATE FORMAT TabSeparated;", detail_queries[i], fuzzer_out_file.generic_string())))
+                    && processServerQuery(false, helperQuery(detail_queries[i])))
                 {
                     String dbuf;
                     std::ifstream detail_file(fuzzer_out_file, std::ios::in);
@@ -1583,11 +1590,10 @@ void FuzzConfig::checkTablesIntegrity(const String & target)
            "looks broken"};
     if (processServerQuery(
             false,
-            fmt::format(
-                "CHECK {} INTO OUTFILE '{}' TRUNCATE FORMAT TabSeparated SETTINGS check_query_single_value_result = 0, "
-                "max_execution_time = 60, timeout_overflow_mode = 'break';",
-                target,
-                fuzzer_out_file.generic_string())))
+            helperQuery(
+                "CHECK " + target,
+                "TabSeparated",
+                "check_query_single_value_result = 0, max_execution_time = 60, timeout_overflow_mode = 'break'")))
     {
         String buf;
         std::ifstream infile(fuzzer_out_file, std::ios::in);

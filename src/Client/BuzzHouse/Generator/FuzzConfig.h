@@ -430,6 +430,8 @@ public:
     FuzzConfig(DB::ClientBase * c, const String & path);
 
     bool processServerQuery(bool outlog, const String & query);
+    /// `query` into the out file, with the session settings that break helper queries reset and `settings` appended
+    String helperQuery(const String & query, const String & format = "TabSeparated", const String & settings = "") const;
 
 private:
     template <typename T, typename ParseFunc>

@@ -2100,9 +2100,7 @@ void ExternalIntegrations::replicateSettings(const PeerTableDatabase pt)
 
     if (fc.processServerQuery(
             false,
-            fmt::format(
-                "SELECT `name`, `value` FROM system.settings WHERE changed = 1 INTO OUTFILE '{}' TRUNCATE FORMAT TabSeparated;",
-                fc.fuzzer_out_file.generic_string())))
+            fc.helperQuery("SELECT `name`, `value` FROM system.settings WHERE changed = 1")))
     {
         std::ifstream infile(fc.fuzzer_out_file);
         while (std::getline(infile, buf) && buf.size() > 1)

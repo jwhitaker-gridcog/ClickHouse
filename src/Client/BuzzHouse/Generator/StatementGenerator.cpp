@@ -3597,10 +3597,30 @@ void StatementGenerator::generateNextKill(RandomGenerator & rg, Kill * kil)
     BinaryExpr * bexpr = kil->mutable_where()->mutable_expr()->mutable_expr()->mutable_comp_expr()->mutable_binary_expr();
 
     bexpr->set_op(BinaryOperator::BINOP_EQ);
-    bexpr->mutable_lhs()->mutable_comp_expr()->mutable_expr_stc()->mutable_col()->mutable_path()->mutable_col()->set_column("mutation_id");
-    bexpr->mutable_rhs()->mutable_lit_val()->set_string_lit(fc.getRandomMutation(rg.nextInFullRange()));
+    if (rg.nextSmallNumber() < 4)
+    {
+        /// Roll back every running transaction, the session's own too, or look up an unknown one
+        const bool running = rg.nextBool();
 
-    kil->set_command(Kill_KillEnum_MUTATION);
+        bexpr->mutable_lhs()->mutable_comp_expr()->mutable_expr_stc()->mutable_col()->mutable_path()->mutable_col()->set_column(
+            running ? "state" : "tid_hash");
+        if (running)
+        {
+            bexpr->mutable_rhs()->mutable_lit_val()->set_string_lit("RUNNING");
+        }
+        else
+        {
+            bexpr->mutable_rhs()->mutable_lit_val()->mutable_int_lit()->set_uint_lit(rg.nextRandomUInt64());
+        }
+        kil->set_command(Kill_KillEnum_TRANSACTION);
+    }
+    else
+    {
+        bexpr->mutable_lhs()->mutable_comp_expr()->mutable_expr_stc()->mutable_col()->mutable_path()->mutable_col()->set_column(
+            "mutation_id");
+        bexpr->mutable_rhs()->mutable_lit_val()->set_string_lit(fc.getRandomMutation(rg.nextInFullRange()));
+        kil->set_command(Kill_KillEnum_MUTATION);
+    }
     if (rg.nextSmallNumber() < 3)
     {
         std::uniform_int_distribution<uint32_t> opt_range(1, static_cast<uint32_t>(Kill::KillOption_MAX));

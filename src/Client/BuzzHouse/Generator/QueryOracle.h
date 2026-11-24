@@ -83,6 +83,7 @@ private:
     void setOracleOutFile(TopSelect * ts, const String & format) const;
     void iterateQuery(google::protobuf::Message & message, const std::vector<MatchHandler> & rules);
     void insertOnTableOrCluster(RandomGenerator & rg, StatementGenerator & gen, const SQLTable & t, bool peer, TableOrFunction * tof) const;
+    void selectFromTableOrMerge(RandomGenerator & rg, StatementGenerator & gen, const SQLTable & t, TableOrFunction * tof) const;
     void generateExportQuery(RandomGenerator & rg, StatementGenerator & gen, bool test_content, const SQLTable & t, SQLQuery & sq2);
     void
     generateImportQuery(RandomGenerator & rg, StatementGenerator & gen, const SQLTable & t, const SQLQuery & sq2, SQLQuery & sq4) const;

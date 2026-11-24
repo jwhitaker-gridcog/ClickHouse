@@ -860,6 +860,25 @@ void QueryOracle::insertOnTableOrCluster(
     }
 }
 
+void QueryOracle::selectFromTableOrMerge(RandomGenerator & rg, StatementGenerator & gen, const SQLTable & t, TableOrFunction * tof) const
+{
+    /// Read through `merge` on the table alone, so the query runs through `StorageMerge`
+    if (!t.getCluster().has_value() && t.getLakeCatalog() == LakeCatalog::None && rg.nextMediumNumber() < 11)
+    {
+        MergeFunc * mdf = tof->mutable_tfunc()->mutable_merge();
+
+        if (t.db)
+        {
+            mdf->set_mdatabase("^" + t.getDatabaseName() + "$");
+        }
+        mdf->set_mtable("^" + t.getBaseName(false) + "$");
+    }
+    else
+    {
+        insertOnTableOrCluster(rg, gen, t, false, tof);
+    }
+}
+
 /// Dump and read table oracle
 void QueryOracle::dumpTableContent(
     RandomGenerator & rg,
@@ -875,7 +894,7 @@ void QueryOracle::dumpTableContent(
     SelectStatementCore * ssc = sel->mutable_select_core();
     JoinedTableOrFunction * jtf = ssc->mutable_from()->mutable_tos()->mutable_join_clause()->mutable_tos()->mutable_joined_table();
 
-    insertOnTableOrCluster(rg, gen, t, false, jtf->mutable_tof());
+    selectFromTableOrMerge(rg, gen, t, jtf->mutable_tof());
     jtf->set_final(t.supportsFinal(true));
     switch (strategy)
     {
@@ -1044,7 +1063,7 @@ void QueryOracle::generateExportQuery(
     /// Set the table on select
     JoinedTableOrFunction * jtf = sel->mutable_from()->mutable_tos()->mutable_join_clause()->mutable_tos()->mutable_joined_table();
 
-    insertOnTableOrCluster(rg, gen, t, false, jtf->mutable_tof());
+    selectFromTableOrMerge(rg, gen, t, jtf->mutable_tof());
     jtf->set_final(t.supportsFinal(true));
 }
 
@@ -1889,7 +1908,7 @@ void QueryOracle::replaceQueryWithTablePeers(
         /// Then insert the data
         insertOnTableOrCluster(rg, gen, t, true, ins->mutable_tof());
         JoinedTableOrFunction * jtf = sel->mutable_from()->mutable_tos()->mutable_join_clause()->mutable_tos()->mutable_joined_table();
-        insertOnTableOrCluster(rg, gen, t, false, jtf->mutable_tof());
+        selectFromTableOrMerge(rg, gen, t, jtf->mutable_tof());
         jtf->set_final(t.supportsFinal(true));
         gen.flatTableColumnPath(skip_nested_node | flat_nested, t.cols, [](const SQLColumn & c) { return c.canBeInserted(); });
         for (const auto & colRef : gen.entries)

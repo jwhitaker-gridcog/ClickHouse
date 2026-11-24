@@ -1,0 +1,10 @@
+-- a partition value that is not a literal
+NOT_IMPLEMENTED
+NOT_IMPLEMENTED
+NOT_IMPLEMENTED
+[1,2,3,4]
+-- a literal partition value
+OK
+OK
+OK
+[1]

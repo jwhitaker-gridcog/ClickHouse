@@ -15,6 +15,11 @@
 #include <Interpreters/DatabaseCatalog.h>
 #include <Interpreters/executeDDLQueryOnCluster.h>
 #include <Parsers/ASTAlterQuery.h>
+#include <Parsers/ASTExpressionList.h>
+#include <Parsers/ASTFunction.h>
+#include <Parsers/ASTHelpers.h>
+#include <Parsers/ASTLiteral.h>
+#include <Parsers/ASTPartition.h>
 #include <Parsers/ASTQueryWithOnCluster.h>
 #include <Parsers/ASTQueryWithOutput.h>
 #include <Parsers/ASTRenameQuery.h>
@@ -66,6 +71,62 @@ bool isSupportedAlterTypeForOnClusterDDLQuery(int type)
     return !unsupported_alter_types.contains(type);
 }
 
+
+/// A literal, or a tuple, an array or a `CAST` of literals, which needs no privilege to evaluate.
+static bool isLiteralPartitionValue(const IAST & ast)
+{
+    if (ast.as<ASTLiteral>())
+    {
+        return true;
+    }
+
+    const auto * function = ast.as<ASTFunction>();
+    if (!function)
+    {
+        return false;
+    }
+
+    const auto * arguments = function->arguments ? function->arguments->as<ASTExpressionList>() : nullptr;
+    if (function->name == "tuple" || function->name == "array")
+    {
+        return !arguments
+            || std::ranges::all_of(arguments->children, [](const ASTPtr & argument) { return isLiteralPartitionValue(*argument); });
+    }
+
+    if (isFunctionCast(function) && arguments && arguments->children.size() == 2)
+    {
+        return isLiteralPartitionValue(*arguments->children[0]) && arguments->children[1]->as<ASTLiteral>();
+    }
+
+    return false;
+}
+
+/// A partition value is evaluated where the partition command is executed. The hosts that do not execute the query as the
+/// initiating user would evaluate it with full access, e.g. a scalar subquery reading a table the user cannot read, so
+/// only a value that needs no privilege to evaluate is allowed then.
+static void rejectPartitionValuesWithoutInitiatorUser(const IAST & ast)
+{
+    if (const auto * partition = ast.as<ASTPartition>())
+    {
+        if (partition->value && !isLiteralPartitionValue(*partition->value))
+        {
+            throw Exception(
+                ErrorCodes::NOT_IMPLEMENTED,
+                "The partition value {} is not a literal. The hosts of a query with ON CLUSTER evaluate it without the "
+                "initiating user, so it can only be a literal or a tuple of literals. To use an expression, let every host "
+                "run the query as the initiating user: enable the server setting distributed_ddl_use_initial_user_and_roles "
+                "on every host, and set distributed_ddl_entry_format_version to at least {}",
+                partition->value->formatForErrorMessage(),
+                DDLLogEntry::INITIATOR_USER_VERSION);
+        }
+        return;
+    }
+
+    for (const auto & child : ast.children)
+    {
+        rejectPartitionValuesWithoutInitiatorUser(*child);
+    }
+}
 
 static bool needsDefaultDatabaseForBareDictionaryOnCluster(const ASTPtr & query_ptr)
 {
@@ -227,6 +288,10 @@ BlockIO executeDDLQueryOnCluster(const ASTPtr & query_ptr_, ContextPtr context, 
 
     /// The workers run the query as the initiator's user and roles only if the entry carries them.
     const bool workers_use_initiator_user = !entry.initiator_user.empty() && entry.version >= DDLLogEntry::INITIATOR_USER_VERSION;
+    if (!workers_use_initiator_user)
+    {
+        rejectPartitionValuesWithoutInitiatorUser(*query_ptr);
+    }
     if (params.additional_access_check)
         for (const auto & default_database : access_check_default_databases)
             params.additional_access_check(default_database, /* throw_if_unresolved = */ !workers_use_initiator_user);

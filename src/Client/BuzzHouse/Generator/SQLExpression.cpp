@@ -1275,7 +1275,17 @@ void StatementGenerator::generateExpression(RandomGenerator & rg, Expr * expr)
 
     switch (static_cast<ExpOp>(expGen.nextOp())) /// drifts over time
     {
-        case ExpOp::Literal: generateLiteralValue(rg, true, expr); break;
+        case ExpOp::Literal:
+            if (rg.nextMediumNumber() < 16)
+            {
+                /// The same value as a full column instead of a const one, which the functions and transforms see per block
+                SQLFuncCall * fcall = expr->mutable_comp_expr()->mutable_func_call();
+
+                fcall->mutable_func()->set_catalog_func("materialize");
+                expr = fcall->add_args()->mutable_expr();
+            }
+            generateLiteralValue(rg, true, expr);
+            break;
         case ExpOp::ColumnRef: generateColRef(rg, expr); break;
         case ExpOp::Predicate: generatePredicate(rg, expr); break;
         case ExpOp::CastExpr: {

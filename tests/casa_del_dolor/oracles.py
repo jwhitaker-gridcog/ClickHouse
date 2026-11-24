@@ -356,3 +356,53 @@ class ElOraculoDeTablas:
                     )
                     logger.warn(message)
                     raise ValueError(message)
+            if random.randint(1, 8) == 1:
+                self._check_all_tables(client, next_node, logger)
+
+    # A part that fails `CHECK` with one of these is damaged; other failures can be outages of a remote disk.
+    # `ReplicatedMergeTree` reports only `looks broken`, and detaches the part as `broken` too.
+    CHECK_CORRUPTION_ERRORS = (
+        "CHECKSUM_DOESNT_MATCH",
+        "CORRUPTED_DATA",
+        "BAD_SIZE_OF_FILE_IN_DATA_PART",
+        "NO_FILE_IN_DATA_PART",
+        "UNEXPECTED_FILE_IN_DATA_PART",
+        "UNKNOWN_PART_TYPE",
+        "BROKEN_PROJECTION",
+        "CANNOT_DECOMPRESS",
+        "TOO_LARGE_SIZE_COMPRESSED",
+        "UNKNOWN_CODEC",
+        "UNKNOWN_FORMAT",
+        "looks broken",
+    )
+
+    def _check_all_tables(self, client: Client, next_node: ClickHouseInstance, logger):
+        """Verify the parts on disk, e.g. that merges hit by `memory_tracker_fault_probability` left no damage."""
+        try:
+            check_str = client.query(
+                "CHECK ALL TABLES FORMAT TSV SETTINGS check_query_single_value_result = 0, max_execution_time = 60, "
+                "timeout_overflow_mode = 'break';"
+            )
+        except Exception as ex:
+            # Memory and network errors are rethrown by the server instead of reported per part. A timeout stops quietly
+            logger.warn(
+                f"Error occurred while checking tables on node {next_node.name}: {ex}"
+            )
+            return
+        if not isinstance(check_str, str):
+            return
+        broken = [
+            line
+            for line in check_str.split("\n")
+            if (fields := line.split("\t"))
+            and len(fields) >= 5
+            and fields[3] == "0"
+            and any(code in fields[4] for code in self.CHECK_CORRUPTION_ERRORS)
+        ]
+        if broken:
+            message = (
+                f"CHECK ALL TABLES found {len(broken)} broken part(s) on node {next_node.name}:\n  "
+                + "\n  ".join(broken[:3])
+            )
+            logger.warn(message)
+            raise ValueError(message)

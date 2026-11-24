@@ -1495,6 +1495,49 @@ void FuzzConfig::validateClickHouseHealth()
             buf.resize(0);
         }
     }
+
+    /// Verify the parts on disk, e.g. after a merge hit by `memory_tracker_fault_probability`. The server rethrows memory
+    /// and network errors, a timeout stops quietly, and other failures can be remote disk outages, so only these are damage.
+    /// `ReplicatedMergeTree` reports only `looks broken`, and detaches the part as `broken` too.
+    static const DB::Strings corruption_errors
+        = {"CHECKSUM_DOESNT_MATCH",
+           "CORRUPTED_DATA",
+           "BAD_SIZE_OF_FILE_IN_DATA_PART",
+           "NO_FILE_IN_DATA_PART",
+           "UNEXPECTED_FILE_IN_DATA_PART",
+           "UNKNOWN_PART_TYPE",
+           "BROKEN_PROJECTION",
+           "CANNOT_DECOMPRESS",
+           "TOO_LARGE_SIZE_COMPRESSED",
+           "UNKNOWN_CODEC",
+           "UNKNOWN_FORMAT",
+           "looks broken"};
+    if (processServerQuery(
+            false,
+            fmt::format(
+                "CHECK ALL TABLES INTO OUTFILE '{}' TRUNCATE FORMAT TabSeparated SETTINGS check_query_single_value_result = 0, "
+                "max_execution_time = 60, timeout_overflow_mode = 'break';",
+                fuzzer_out_file.generic_string())))
+    {
+        String buf;
+        std::ifstream infile(fuzzer_out_file, std::ios::in);
+        while (std::getline(infile, buf))
+        {
+            /// Columns: database, table, part_path, is_passed, message
+            const size_t passed_pos = buf.find('\t', buf.find('\t', buf.find('\t') + 1) + 1);
+
+            if (passed_pos != String::npos && buf.compare(passed_pos + 1, 2, "0\t") == 0
+                && std::ranges::any_of(corruption_errors, [&](const String & code) { return buf.find(code, passed_pos) != String::npos; }))
+            {
+                throw DB::Exception(
+                    DB::ErrorCodes::BUZZHOUSE_ORACLE,
+                    "ClickHouse health check on {}:{}: CHECK ALL TABLES found a broken part: {}",
+                    host,
+                    port,
+                    buf);
+            }
+        }
+    }
 }
 
 void FuzzConfig::comparePerformanceResults(const String & oracle_name, PerformanceResult & server, PerformanceResult & peer) const

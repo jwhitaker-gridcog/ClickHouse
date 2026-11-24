@@ -1595,21 +1595,26 @@ bool DolorIntegration::performTableIntegration(RandomGenerator & rg, SQLTable & 
             escapeJSON(t.getSparkCatalogName()),
             t.isOnS3() ? "s3" : (t.isOnAzure() ? "azure" : "local"));
     }
-    else if (t.isAnyStreamingEngine() || t.isAnyQueueEngine())
+    else if (t.isAnyStreamingEngine() || t.isAnyQueueEngine() || t.isFileLogEngine())
     {
-        /// For a queue, the path within the bucket or container, and the compression the objects are written with
+        /// For a queue, the path within the bucket or container, and the compression the objects are written with.
+        /// For FileLog, the path of the files
         const bool is_queue = t.isAnyQueueEngine();
+        const bool is_filelog = t.isFileLogEngine();
 
         buf += fmt::format(
             R"(,"engine":"{}","topic":"{}","group":"{}")",
             t.getDolorEngineName(),
-            escapeJSON(is_queue ? t.getTablePath() : t.topic.value()),
-            escapeJSON(is_queue ? t.file_comp.value_or("auto") : t.group.value_or("")));
+            escapeJSON((is_queue || is_filelog) ? t.getTablePath() : t.topic.value()),
+            escapeJSON(is_queue ? t.file_comp.value_or("auto") : (is_filelog ? "" : t.group.value_or(""))));
     }
-    else if (t.isFileEngine())
+    else if (t.isDataFileEngine())
     {
         buf += fmt::format(
-            R"(,"engine":"file","path":"{}","compression":"{}")", escapeJSON(t.getTablePath()), escapeJSON(t.file_comp.value_or("none")));
+            R"(,"engine":"file","path":"{}","compression":"{}","storage":"{}")",
+            escapeJSON(t.getTablePath()),
+            escapeJSON(t.file_comp.value_or("auto")),
+            t.isS3Engine() ? "s3" : (t.isAzureEngine() ? "azure" : (t.isURLEngine() ? "url" : "local")));
     }
     buf += "}";
     fc.outf << "--External table " << buf << std::endl;
@@ -1699,11 +1704,15 @@ void DolorIntegration::setTableEngineDetails(RandomGenerator & rg, const SQLTabl
                  }});
         }
     }
-    else if (t.isAnyQueueEngine())
+    else if (t.isAnyS3Engine() || t.isAnyAzureEngine())
     {
         /// The same storage as without dolor, which only writes objects to the path
-        te->add_params()->set_rvalue(
-            t.isS3QueueEngine() ? fc.minio_server.value().named_collection : fc.azurite_server.value().named_collection);
+        te->add_params()->set_rvalue(t.isOnS3() ? fc.minio_server.value().named_collection : fc.azurite_server.value().named_collection);
+    }
+    else if (t.isURLEngine())
+    {
+        /// The same server as without dolor, which only writes the data file there
+        te->add_params()->set_svalue(t.getTablePath(rg, false));
     }
     else if (t.isAnyStreamingEngine())
     {

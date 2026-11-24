@@ -1239,9 +1239,7 @@ bool Client::buzzHouse()
                          const auto & tbl
                              = rg.pickRandomly(gen.filterCollection<BuzzHouse::SQLTable>(gen.attached_tables_for_external_call)).get();
                          const String engine = tbl.getDolorEngineName();
-                         const auto & ndname
-                             = (tbl.isAnyStreamingEngine() || tbl.isFileEngine() || tbl.isAnyQueueEngine()) ? tbl.getDatabaseName()
-                                                                                                             : tbl.getSparkCatalogName();
+                         const auto & ndname = tbl.isAnyLakeEngine() ? tbl.getSparkCatalogName() : tbl.getDatabaseName();
                          const auto & ntname = tbl.getBaseName(false);
                          const bool async = fuzz_config->allow_async_requests && rg.nextSmallNumber() < 4;
 

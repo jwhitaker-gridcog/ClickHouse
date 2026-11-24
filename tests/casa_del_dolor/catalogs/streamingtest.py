@@ -1,8 +1,10 @@
 import asyncio
 import csv
+import fnmatch
 import io
 import json
 import logging
+import os
 import random
 import subprocess
 import threading
@@ -12,11 +14,9 @@ from datetime import date, datetime
 from decimal import Decimal
 
 import pika
-from azure.core.exceptions import ResourceNotFoundError
 from kafka import KafkaAdminClient
 from kafka.admin import ConfigResource, ConfigResourceType, NewPartitions, NewTopic
 from kafka.errors import TopicAlreadyExistsError, UnknownTopicOrPartitionError
-from minio.commonconfig import Tags
 from nats.js import api
 from pyspark.sql import Row
 
@@ -24,7 +24,14 @@ from tests.integration.helpers.cluster import docker_exec, nats_connect_ssl
 import tests.integration.helpers.kafka.common as k
 
 from .datagenerator import LakeDataGenerator, _to_json_safe
-from .filetables import _COMPRESSION_ALIASES, DATA_FILE_FORMATS, _compress_bytes
+from .filetables import (
+    DATA_FILE_FORMATS,
+    _compress_bytes,
+    delete_data,
+    host_data_path,
+    put_data,
+    resolve_compression,
+)
 
 
 def _encode(message) -> bytes:
@@ -556,12 +563,26 @@ class RabbitMQHandler(StreamingHandler):
             super().on_update(table)
 
 
+# Name prefixes that sort before and after each other, so `ordered` mode also sees older names
+_NAME_PREFIXES = ("0", "5", "a", "m", "z", "~")
+
+
+def _random_name() -> str:
+    return f"{random.choice(_NAME_PREFIXES)}{uuid.uuid4().hex[:8]}"
+
+
+def _expand_path(path: str) -> str:
+    """A name that `path` matches: each `*` replaced, and a name added to a directory."""
+    while "*" in path:
+        path = path.replace("*", _random_name(), 1)
+    if not path or path.endswith("/"):
+        path += _random_name()
+    return path
+
+
 class ObjectQueueHandler(StreamingHandler):
     """Writes objects, broken ones too, where an S3Queue or AzureQueue table reads. The `topic` of the
     table is its path in the bucket or container, maybe a glob, and its `group` the compression."""
-
-    # Name prefixes that sort before and after each other, so `ordered` mode also sees older names
-    _NAME_PREFIXES = ("0", "5", "a", "m", "z", "~")
 
     def __init__(self, cluster, spark_handler, is_azure: bool):
         super().__init__(cluster, spark_handler)
@@ -569,56 +590,18 @@ class ObjectQueueHandler(StreamingHandler):
         # The objects written under each path, to overwrite or delete some of them later
         self.written: dict[str, list[str]] = {}
 
-    def _name(self) -> str:
-        return f"{random.choice(self._NAME_PREFIXES)}{uuid.uuid4().hex[:8]}"
-
-    def _key(self, path: str) -> str:
-        key = path.lstrip("/")
-        while "*" in key:
-            key = key.replace("*", self._name(), 1)
-        if not key or key.endswith("/"):
-            key += self._name()
-        return key
-
     @staticmethod
-    def _compression(key: str, compression: str) -> str:
-        method = compression.lower()
-        if method == "auto":
-            # ClickHouse picks the method from the extension
-            name = key.rsplit("/", 1)[-1]
-            method = name.rsplit(".", 1)[-1].lower() if "." in name else "none"
-        return _COMPRESSION_ALIASES.get(method, method)
-
-    def _blob(self, key: str):
-        return self.cluster.blob_service_client.get_blob_client(self.cluster.azure_container_name, key)
+    def _key(path: str) -> str:
+        return _expand_path(path.lstrip("/"))
 
     def _outside_key(self, key: str) -> str:
         # Usually not matched by the path: another extension, one directory deeper, or another prefix
         head, _, name = key.rpartition("/")
-        deeper = f"{head}/{self._name()}/{name}" if head else f"{self._name()}/{name}"
+        deeper = f"{head}/{_random_name()}/{name}" if head else f"{_random_name()}/{name}"
         return random.choice([f"{key}.x", deeper, f"x{key}"])
 
-    def _put(self, key: str, data: bytes, tags: dict | None):
-        if self.is_azure:
-            self._blob(key).upload_blob(data, overwrite=True, tags=tags)
-        else:
-            object_tags = None
-            if tags:
-                object_tags = Tags(for_object=True)
-                object_tags.update(tags)
-            self.cluster.minio_client.put_object(
-                self.cluster.minio_bucket, key, io.BytesIO(data), len(data), tags=object_tags
-            )
-
     def _delete(self, key: str):
-        if self.is_azure:
-            try:
-                self._blob(key).delete_blob()
-            except ResourceNotFoundError:
-                # ClickHouse moved or deleted it after processing, MinIO ignores a missing object too
-                pass
-        else:
-            self.cluster.minio_client.remove_object(self.cluster.minio_bucket, key)
+        delete_data(self.cluster, "azure" if self.is_azure else "s3", key)
 
     def produce(self, table: StreamingTable, messages: list):
         written = self.written.setdefault(table.topic, [])
@@ -633,9 +616,9 @@ class ObjectQueueHandler(StreamingHandler):
                 key = self._outside_key(key)
             data = _encode(message)
             try:
-                data = _compress_bytes(data, self._compression(key, table.group))
+                data = _compress_bytes(data, resolve_compression(key, table.group))
             except ValueError:
-                # No Python codec (lz4, brotli) or no compression extension: the object stays as is
+                # No Python codec (lz4, brotli): the object stays as is
                 pass
             # The tags BuzzHouse sets for `after_processing = 'tag'`, so an object may look processed already
             tags = (
@@ -643,7 +626,7 @@ class ObjectQueueHandler(StreamingHandler):
                 if random.randint(1, 10) == 1
                 else None
             )
-            self._put(key, data, tags)
+            put_data(self.cluster, "azure" if self.is_azure else "s3", key, data, tags)
             if key not in written:
                 written.append(key)
         del written[:-100]
@@ -659,5 +642,92 @@ class ObjectQueueHandler(StreamingHandler):
             # More objects than a listing page of MinIO (1000), from one batch of messages to stay fast
             messages = self.next_messages(table)
             self.produce(table, [random.choice(messages) for _ in range(random.randint(1000, 1500))])
+        else:
+            super().on_update(table)
+
+
+class FileLogHandler(StreamingHandler):
+    """Writes the files a FileLog table reads, and appends to, truncates, renames, replaces or deletes
+    them while ClickHouse keeps its offset in each. The `topic` of the table is its path: a directory
+    when it ends with `/`, a glob when it has `*`, otherwise one file."""
+
+    def _location(self, table: StreamingTable) -> str:
+        return host_data_path(self.cluster, table.topic)
+
+    def _files(self, table: StreamingTable) -> list[str]:
+        directory, _, pattern = self._location(table).rpartition("/")
+        if not os.path.isdir(directory):
+            return []
+        return [
+            entry.path
+            for entry in os.scandir(directory)
+            if entry.is_file(follow_symlinks=False)
+            and (not pattern or fnmatch.fnmatchcase(entry.name, pattern))
+        ]
+
+    def _write(self, path: str, data: bytes, append: bool):
+        if append:
+            with open(path, "ab") as out:
+                out.write(data)
+        else:
+            # Another inode under the same name
+            with open(path + ".tmp", "wb") as out:
+                out.write(data)
+            os.replace(path + ".tmp", path)
+
+    def on_create(self, table: StreamingTable):
+        location = self._location(table)
+        os.makedirs(os.path.dirname(location), exist_ok=True)
+        if "*" not in location and not location.endswith("/"):
+            # The one file must exist at CREATE
+            open(location, "ab").close()
+        super().on_create(table)
+
+    def produce(self, table: StreamingTable, messages: list):
+        files = self._files(table)
+        # The rows of a text format go on in the same file, a binary format takes a whole data file
+        is_text = table.format.lower() not in DATA_FILE_FORMATS
+        for message in messages:
+            data = _encode(message)
+            if is_text and data and not data.endswith(b"\n") and random.randint(1, 10) > 1:
+                # Otherwise the last row goes on in the next write
+                data += b"\n"
+            if files and random.randint(1, 4) <= (3 if is_text else 1):
+                path = random.choice(files)
+            else:
+                path = _expand_path(self._location(table))
+            self._write(path, data, True)
+            if path not in files:
+                files.append(path)
+
+    def on_update(self, table: StreamingTable):
+        files = self._files(table)
+        location = self._location(table)
+        action = random.randint(1, 100)
+        if files and action <= 25:
+            path = random.choice(files)
+            if action <= 5:
+                # Maybe below the offset ClickHouse keeps for it
+                os.truncate(path, random.randint(0, os.path.getsize(path)))
+            elif action <= 10:
+                os.remove(path)
+            elif action <= 15:
+                # The same inode under another name, which the path may exclude
+                os.rename(path, random.choice([_expand_path(location), path + ".x"]))
+            elif action <= 20:
+                self._write(path, b"".join(_encode(m) + b"\n" for m in self.next_messages(table)), False)
+            else:
+                # A link to a file the table reads already
+                link = _expand_path(location)
+                if not os.path.lexists(link):
+                    os.symlink(path, link)
+        elif action <= 30:
+            # A file the path excludes, or in a subdirectory: ClickHouse does not read either
+            directory = os.path.dirname(location)
+            path = random.choice(
+                [_expand_path(location) + ".x", os.path.join(directory, _random_name(), "f")]
+            )
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            self._write(path, b"".join(_encode(m) + b"\n" for m in self.next_messages(table)), True)
         else:
             super().on_update(table)
